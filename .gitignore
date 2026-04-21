@@ -1,7 +1,8 @@
 __pycache__/
+*.pyc
 .env
-.venv
+.venv/
+venv/
 resume.json
 resume.pdf
-verify_pdf.py
-test_resume.pdf
+Daily Logs/

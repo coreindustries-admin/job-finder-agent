@@ -1,9 +1,8 @@
 from supabase import create_client, Client
-import config # Import configuration
+import config
 from typing import Optional, Any, Dict
-from models import Resume
-import datetime # Import datetime module
-import logging # Import logging
+import datetime
+import logging
 
 # --- Initialize Supabase Client ---
 # Ensure URL and Key are provided
@@ -13,7 +12,7 @@ if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY)
 
 # --- Supabase Functions ---
-def get_existing_jobs_from_supabase(batch_size: int = 1000) -> tuple[set, set]:
+def get_existing_jobs_from_supabase(batch_size: int = 1000) -> tuple:
     """
     Fetches all existing job IDs and company-title pairs from the Supabase 'jobs' table.
     Returns:
@@ -133,10 +132,12 @@ def get_jobs_to_score(limit: int) -> list:
     try:
         logging.info(f"Fetching up to {limit} jobs needing scoring...")
         # Select fields needed for scoring
+        # Prioritize jobs with actual descriptions (Indeed > LinkedIn which has empty ones)
         response = supabase.table(config.SUPABASE_TABLE_NAME)\
-                           .select("job_id, job_title, company, description, level")\
+                           .select("job_id, job_title, company, description, level, location, job_type, salary_min, salary_max, salary_interval, is_remote")\
                            .eq("is_active", True)\
                            .is_("resume_score", None)\
+                           .neq("description", "")\
                            .order("scraped_at", desc=False)\
                            .limit(limit)\
                            .execute()
@@ -300,7 +301,7 @@ def update_job_score(job_id: str, score: int, resume_score_stage: str = "initial
         logging.error(f"Error updating score for job_id {job_id} in Supabase: {e}")
         return False
 
-def get_job_by_id(job_id: str) -> dict | None:
+def get_job_by_id(job_id: str) -> Optional[dict]:
     """
     Fetches a single job record from the Supabase 'jobs' table based on job_id.
     """
@@ -419,7 +420,7 @@ def update_job_with_resume_link(job_id: str, customized_resume_id: str,  new_sta
         logging.error(f"Error updating job {job_id} in Supabase: {e}")
         return False
 
-def save_customized_resume(resume_data: 'Resume', resume_path: str) -> Optional[Any]: # Return type changed
+def save_customized_resume(resume_data: Any, resume_path: str) -> Optional[Any]:
     """
     Saves a customized resume to the Supabase 'customized_resumes' table.
 

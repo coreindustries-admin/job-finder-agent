@@ -1,359 +1,271 @@
+"""
+Job scoring pipeline using Claude.
+
+Scores each job listing against the agent profile on a 1-10 scale
+with a one-line reasoning explanation.
+"""
+
 import time
-import json
 import logging
-from typing import List, Optional, Dict, Any
-import requests
-import io
-import pdfplumber
-import os
+from typing import Optional
 
 import config
 import supabase_utils
-from llm_client import primary_client
+from llm_client import generate
 
-# --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# --- Helper Functions ---
 
-def format_resume_to_text(resume_data: Dict[str, Any]) -> str:
+SCORING_SYSTEM_PROMPT = """You are a job scoring assistant. You evaluate job listings for fit against a candidate's profile.
+
+Score each job on a scale of 1-10:
+- 1-2: Dealbreaker present or completely wrong fit
+- 3-4: Poor fit, major misalignment
+- 5-6: Partial fit, some relevant elements
+- 7-8: Good fit, strong alignment
+- 9-10: Excellent fit, nearly perfect match
+
+IMPORTANT: The candidate is ONLY looking for part-time, contract, freelance, or project-based work (10-20 hrs/week). Full-time roles should be scored lower unless they explicitly mention flexibility.
+
+Return ONLY a JSON object with these fields:
+{
+  "score": <integer 1-10>,
+  "tldr": "<2-3 sentence plain-English summary of what the job actually is and what they want>",
+  "pros": ["<pro 1>", "<pro 2>"],
+  "cons": ["<con 1>", "<con 2>"]
+}
+
+Keep the tldr conversational and specific. Pros/cons should be from the candidate's perspective based on their profile. 2-3 of each, short phrases. No other text, just the JSON."""
+
+
+def build_scoring_prompt(job: dict, profile: dict) -> str:
+    """Build the scoring prompt with job details and profile context."""
+
+    resume_text = profile.get("resume_text", "")
+    target_roles = profile.get("target_roles", [])
+    skills = profile.get("skills", [])
+    job_types = profile.get("job_types", [])
+    location_pref = profile.get("location_preference", "")
+    anti_patterns = profile.get("anti_patterns", "")
+    custom_prompt = profile.get("custom_prompt", "")
+
+    prompt = f"""## CANDIDATE PROFILE
+
+**Target Roles:** {', '.join(target_roles) if target_roles else 'Not specified'}
+**Key Skills:** {', '.join(skills) if skills else 'Not specified'}
+**Work Types:** {', '.join(job_types) if job_types else 'Any'}
+**Location:** {location_pref or 'Remote preferred'}
+
+**Resume:**
+{resume_text[:3000] if resume_text else 'Not available'}
+
+**Positive Signal Keywords (boost score):**
+n8n, Make, Zapier, automation platforms, AI, LLM, Claude, OpenAI, GPT, Gemini, AI integration, AI implementation, Supabase, Airtable, Firebase, PostgreSQL, React, Next.js, Framer, web development, API integration, webhook, workflow automation, no-code, low-code, citizen developer, MCP, Model Context Protocol, AI agents, Cursor, Claude Code, AI-assisted development, CRM, process optimization, digital transformation, UI/UX, design systems, frontend development
+
+**Automatic Dealbreakers (score 1-2):**
+- Requires a CS degree
+- Requires 5+ years traditional coding experience
+- On-call / pager duty
+- Heavy people management roles
+- Java, .NET, C++, enterprise legacy stacks
+- Heavy data science / ML model training / statistical modeling
+- Manual QA / software testing
+- DevOps, infrastructure, sysadmin, cloud ops
+
+**Bilingual bonus:** English (native) + Spanish (fluent). Roles valuing bilingual get a score boost.
+
+"""
+
+    if anti_patterns:
+        prompt += f"""**Learned Anti-Patterns (from feedback, also score lower):**
+{anti_patterns}
+
+"""
+
+    if custom_prompt:
+        prompt += f"""**Additional Instructions:**
+{custom_prompt}
+
+"""
+
+    # Format salary for the prompt
+    sal_min = job.get('salary_min')
+    sal_max = job.get('salary_max')
+    sal_interval = job.get('salary_interval', '')
+    salary_str = 'Not listed'
+    if sal_min or sal_max:
+        parts = []
+        if sal_min:
+            parts.append(f"${float(sal_min):,.0f}")
+        if sal_max:
+            parts.append(f"${float(sal_max):,.0f}")
+        salary_str = " - ".join(parts)
+        if sal_interval:
+            salary_str += f" ({sal_interval})"
+
+    job_type = job.get('job_type', 'Not specified')
+    is_remote = job.get('is_remote')
+    remote_str = 'Yes' if is_remote else ('No' if is_remote is False else 'Not specified')
+
+    prompt += f"""## JOB LISTING
+
+**Title:** {job.get('job_title', 'N/A')}
+**Company:** {job.get('company', 'N/A')}
+**Location:** {job.get('location', 'N/A')}
+**Job Type:** {job_type}
+**Remote:** {remote_str}
+**Salary:** {salary_str}
+**Level:** {job.get('level', 'N/A')}
+
+**Description:**
+{job.get('description', 'No description available')[:4000]}
+
+---
+
+CRITICAL RULE: If Job Type is "fulltime" and the description does NOT explicitly mention part-time flexibility, reduced hours, or contract options, the score MUST be 4/10 or lower regardless of other fit factors. The candidate cannot take full-time work.
+
+Score this job. Return only the JSON object."""
+
+    return prompt
+
+
+def score_job(job: dict, profile: dict) -> Optional[dict]:
     """
-    Formats the structured resume data dictionary into a plain text string.
+    Score a single job against the profile.
+
+    Returns:
+        Dict with score, tldr, pros, cons — or None on failure.
     """
-    if not resume_data:
-        return "Resume data is not available."
+    import json
 
-    lines = []
-
-    # Basic Info
-    lines.append(f"Name: {resume_data.get('name', 'N/A')}")
-    lines.append(f"Email: {resume_data.get('email', 'N/A')}")
-    if resume_data.get('phone'): lines.append(f"Phone: {resume_data['phone']}")
-    if resume_data.get('location'): lines.append(f"Location: {resume_data['location']}")
-    if resume_data.get('links'):
-        links_str = ", ".join(f"{k}: {v}" for k, v in resume_data['links'].items() if v)
-        if links_str: lines.append(f"Links: {links_str}")
-    lines.append("\n---\n")
-
-    # Summary
-    if resume_data.get('summary'):
-        lines.append("Summary:")
-        lines.append(resume_data['summary'])
-        lines.append("\n---\n")
-
-    # Skills
-    if resume_data.get('skills'):
-        lines.append("Skills:")
-        lines.append(", ".join(resume_data['skills']))
-        lines.append("\n---\n")
-
-    # Experience
-    if resume_data.get('experience'):
-        lines.append("Experience:")
-        for exp in resume_data['experience']:
-            lines.append(f"\n* {exp.get('job_title', 'N/A')} at {exp.get('company', 'N/A')}")
-            if exp.get('location'): lines.append(f"  Location: {exp['location']}")
-            date_range = f"{exp.get('start_date', '?')} - {exp.get('end_date', 'Present')}"
-            lines.append(f"  Dates: {date_range}")
-            if exp.get('description'):
-                lines.append("  Description:")
-                # Indent description lines
-                desc_lines = exp['description'].split('\n')
-                lines.extend([f"    - {line.strip()}" for line in desc_lines if line.strip()])
-        lines.append("\n---\n")
-
-    # Education
-    if resume_data.get('education'):
-        lines.append("Education:")
-        for edu in resume_data['education']:
-            degree_info = f"{edu.get('degree', 'N/A')}"
-            if edu.get('field_of_study'): degree_info += f", {edu['field_of_study']}"
-            lines.append(f"\n* {degree_info} from {edu.get('institution', 'N/A')}")
-            year_range = f"{edu.get('start_year', '?')} - {edu.get('end_year', 'Present')}"
-            lines.append(f"  Years: {year_range}")
-        lines.append("\n---\n")
-
-    # Projects
-    if resume_data.get('projects'):
-        lines.append("Projects:")
-        for proj in resume_data['projects']:
-            lines.append(f"\n* {proj.get('name', 'N/A')}")
-            if proj.get('description'): lines.append(f"  Description: {proj['description']}")
-            if proj.get('technologies'): lines.append(f"  Technologies: {', '.join(proj['technologies'])}")
-        lines.append("\n---\n")
-
-    # Certifications
-    if resume_data.get('certifications'):
-        lines.append("Certifications:")
-        for cert in resume_data['certifications']:
-            cert_info = f"{cert.get('name', 'N/A')}"
-            if cert.get('issuer'): cert_info += f" ({cert['issuer']})"
-            if cert.get('year'): cert_info += f" - {cert['year']}"
-            lines.append(f"* {cert_info}")
-        lines.append("\n---\n")
-
-    # Languages
-    if resume_data.get('languages'):
-        lines.append("Languages:")
-        lines.append(", ".join(resume_data['languages']))
-        lines.append("\n---\n")
-
-    return "\n".join(lines)
-
-
-def get_resume_score_from_ai(resume_text: str, job_details: Dict[str, Any]) -> Optional[int]:
-    """
-    Sends resume and job details to Gemini to get a suitability score.
-    Returns the score as an integer (0-100) or None if scoring fails.
-    """
-    if not resume_text or not job_details or not job_details.get('description'):
-        logging.warning(f"Missing resume text or job description for job_id {job_details.get('job_id')}. Skipping scoring.")
-        return None
-
-    job_company = job_details.get('company', 'N/A')
-    job_title = job_details.get('job_title', 'N/A')
-    job_description = job_details.get('description', 'N/A')
-    job_level = job_details.get('level', 'N/A')
-
-    logging.info(f"Scoring job_id: {job_details.get('job_id')} with job_title: {job_title} and job_level: {job_level}")
-
-    prompt = f"""
-    You are a scoring assistant. You will be given a resume and a job description.  
-    Based **only** on the information provided, **return exactly one integer between 0 and 100** (inclusive) that represents the candidate’s suitability for the role.  
-    Do **not** return any words, punctuation, or explanation—only the integer.
-
-    --- RESUME ---
-    {resume_text}
-    --- END RESUME ---
-
-    --- JOB DESCRIPTION ---
-    Job Title: {job_title}
-    Company: {job_company}
-    Level: {job_level}
-
-    {job_description}
-    --- END JOB DESCRIPTION ---
-
-    Score (0–100):
-    """
+    prompt = build_scoring_prompt(job, profile)
 
     try:
-        logging.info(f"Requesting score for job_id: {job_details.get('job_id')}")
-        score_text = primary_client.generate_content(
+        response_text = generate(
             prompt=prompt,
+            system_prompt=SCORING_SYSTEM_PROMPT,
+            temperature=0.2,
+            max_tokens=400,
         )
 
-        # Attempt to parse the score
-        score = int(score_text.strip())
-        if 0 <= score <= 100:
-            logging.info(f"Received score {score} for job_id: {job_details.get('job_id')}")
-            return score
+        # Strip markdown code fences if present
+        text = response_text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]  # remove first line (```json)
+            if text.endswith("```"):
+                text = text[:-3].strip()
+
+        # Parse JSON response
+        result = json.loads(text)
+        score = int(result.get("score", 0))
+        tldr = result.get("tldr", "")
+        pros = result.get("pros", [])
+        cons = result.get("cons", [])
+
+        if 1 <= score <= 10:
+            return {
+                "score": score,
+                "tldr": tldr,
+                "pros": pros,
+                "cons": cons,
+                "reason": tldr,  # backward compat
+            }
         else:
-            logging.warning(f"Received score out of range ({score}) for job_id: {job_details.get('job_id')}. Raw response: '{score_text}'")
+            logging.warning(f"Score out of range ({score}) for job {job.get('job_id')}")
             return None
-    except ValueError:
-        logging.error(f"Could not parse integer score from LLM response for job_id: {job_details.get('job_id')}. Raw response: '{score_text}'")
+
+    except json.JSONDecodeError:
+        logging.error(f"Could not parse JSON from LLM for job {job.get('job_id')}: {response_text[:200]}")
         return None
     except Exception as e:
-        logging.error(f"Error calling LLM API for job_id {job_details.get('job_id')}: {e}")
+        logging.error(f"Error scoring job {job.get('job_id')}: {e}")
         return None
 
 
-def extract_text_from_pdf_url(pdf_url: str) -> Optional[str]:
-    """
-    Downloads a PDF from a URL and extracts text from it.
-    """
-    if not pdf_url:
-        logging.warning("No PDF URL provided for text extraction.")
-        return None
+def get_agent_profile() -> dict:
+    """Fetch the agent profile from Supabase."""
     try:
-        logging.info(f"Downloading PDF from URL: {pdf_url}")
-        response = requests.get(pdf_url, timeout=30) 
-        response.raise_for_status()  # Raise an exception for bad status codes
-
-        logging.info(f"Successfully downloaded PDF. Extracting text...")
-        text = ""
-        with io.BytesIO(response.content) as pdf_file:
-            with pdfplumber.open(pdf_file) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-        
-        if not text.strip():
-            logging.warning(f"Extracted no text from PDF at {pdf_url}. The PDF might be image-based or empty.")
-            return None
-            
-        logging.info(f"Successfully extracted text from PDF URL: {pdf_url[:70]}...")
-        return text.strip()
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error downloading PDF from {pdf_url}: {e}")
-        return None
-    except pdfplumber.exceptions.PDFSyntaxError: # Catch specific pdfplumber error
-        logging.error(f"Error: Could not open PDF from {pdf_url}. It might be corrupted or not a PDF.")
-        return None
+        response = supabase_utils.supabase.table("agent_profile").select("*").limit(1).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        else:
+            logging.warning("No agent profile found in database. Using empty profile.")
+            return {}
     except Exception as e:
-        logging.error(f"An unexpected error occurred while extracting text from PDF URL {pdf_url}: {e}")
-        return None
+        logging.error(f"Error fetching agent profile: {e}")
+        return {}
 
-def rescore_jobs_with_custom_resume():
-    """Fetches jobs with custom resumes and re-scores them."""
-    logging.info("--- Starting Job Re-scoring with Custom Resumes ---")
-    rescore_start_time = time.time()
 
-    jobs_to_rescore = supabase_utils.get_jobs_to_rescore(config.JOBS_TO_SCORE_PER_RUN)
-    if not jobs_to_rescore:
-        logging.info("No jobs require re-scoring with custom resumes at this time.")
-        logging.info("--- Job Re-scoring Finished (No Jobs) ---")
-        return
+def score_unscored_jobs(limit: int = None) -> list:
+    """
+    Fetch unscored jobs from Supabase, score them, and update the database.
 
-    logging.info(f"Processing {len(jobs_to_rescore)} jobs for re-scoring...")
-    successful_rescores = 0
-    failed_rescores = 0
+    Returns:
+        List of scored job dicts (with score and reason).
+    """
+    limit = limit or config.JOBS_TO_SCORE_PER_RUN
+    logging.info(f"--- Starting Job Scoring (limit: {limit}) ---")
 
-    for i, job in enumerate(jobs_to_rescore):
-        job_id = job.get('job_id')
-        resume_link = job.get('resume_link')
-        customized_resume_id = job.get('customized_resume_id')
+    # Get profile
+    profile = get_agent_profile()
+    if not profile:
+        logging.error("Cannot score without a profile. Aborting.")
+        return []
 
+    # Get unscored jobs (include extra fields for the digest)
+    jobs_to_score = supabase_utils.get_jobs_to_score(limit)
+    if not jobs_to_score:
+        logging.info("No jobs need scoring.")
+        return []
+
+    logging.info(f"Scoring {len(jobs_to_score)} jobs...")
+    scored_jobs = []
+
+    for i, job in enumerate(jobs_to_score):
+        job_id = job.get("job_id")
         if not job_id:
-            logging.warning(f"Skipping re-scoring for job due to missing job_id: {job}")
-            failed_rescores += 1
             continue
 
-        logging.info(f"--- Re-scoring Job {i+1}/{len(jobs_to_rescore)} (ID: {job_id}) ---")
+        logging.info(f"Scoring {i+1}/{len(jobs_to_score)}: {job.get('job_title', 'Unknown')} at {job.get('company', 'Unknown')}")
 
-        custom_resume_text = None
+        result = score_job(job, profile)
+        if result:
+            # Update in Supabase (store score * 10 to fit the 0-100 column)
+            score_for_db = result["score"] * 10
+            supabase_utils.update_job_score(job_id, score_for_db, resume_score_stage="initial")
+            # Save scoring details
+            try:
+                import json as _json
+                supabase_utils.supabase.table("jobs").update({
+                    "score_reason": result["tldr"],
+                    "score_tldr": result["tldr"],
+                    "score_pros": _json.dumps(result["pros"]),
+                    "score_cons": _json.dumps(result["cons"]),
+                }).eq("job_id", job_id).execute()
+            except Exception:
+                pass
 
-        # Try to get resume data from database first
-        if customized_resume_id:
-            logging.info(f"Targeting customized_resume_id: {customized_resume_id}")
-            db_resume_data = supabase_utils.get_customized_resume(customized_resume_id)
-            if db_resume_data:
-                logging.info(f"Successfully retrieved customized resume data from DB for job {job_id}")
-                custom_resume_text = format_resume_to_text(db_resume_data)
-            else:
-                logging.warning(f"Could not find customized resume data in DB for ID {customized_resume_id}. Falling back to PDF.")
-
-        # Fallback to PDF extraction if DB retrieval failed or ID was missing
-        if not custom_resume_text and resume_link:
-            logging.info(f"Attempting to extract text from custom resume PDF from {resume_link[:70]}...")
-            custom_resume_text = extract_text_from_pdf_url(resume_link)
-
-        if not custom_resume_text:
-            logging.error(f"Failed to obtain custom resume text for job_id {job_id} from both DB and PDF. Skipping.")
-            failed_rescores += 1
-            if i < len(jobs_to_rescore) - 1:
-                logging.debug(f"Waiting {config.LLM_REQUEST_DELAY_SECONDS} seconds before next job...")
-                time.sleep(config.LLM_REQUEST_DELAY_SECONDS)
-            continue
-        
-        logging.debug(f"Custom resume text for job {job_id} (first 200 chars): {custom_resume_text[:200]}")
-        score = get_resume_score_from_ai(custom_resume_text, job)
-
-        if score is not None:
-            if supabase_utils.update_job_score(job_id, score, resume_score_stage="custom"):
-                successful_rescores += 1
-            else:
-                failed_rescores += 1 
+            scored_jobs.append({
+                **job,
+                "score": result["score"],
+                "reason": result["reason"],
+            })
+            logging.info(f"  Score: {result['score']}/10 — {result['reason']}")
         else:
-            failed_rescores += 1 
+            logging.warning(f"  Failed to score job {job_id}")
 
-        if i < len(jobs_to_rescore) - 1: 
-            logging.debug(f"Waiting {config.LLM_REQUEST_DELAY_SECONDS} seconds before next API call...")
-            time.sleep(config.LLM_REQUEST_DELAY_SECONDS)
+        # Small delay between API calls
+        if i < len(jobs_to_score) - 1:
+            time.sleep(1)
 
-    rescore_end_time = time.time()
-    logging.info("--- Job Re-scoring Finished ---")
-    logging.info(f"Successfully re-scored: {successful_rescores}")
-    logging.info(f"Failed/Skipped re-scores: {failed_rescores}")
-    logging.info(f"Total re-scoring time: {rescore_end_time - rescore_start_time:.2f} seconds")
-
-# --- Main Execution ---
-
-def main():
-    """Main function to score jobs based on the target resume."""
-    logging.info("--- Starting Job Scoring Script ---")
-    overall_start_time = time.time()
-
-    # --- Phase 1: Initial Scoring with Default Resume ---
-    logging.info("--- Phase 1: Initial Scoring with Default Resume ---")
-    initial_score_start_time = time.time()
-    
-    resume_path = getattr(config, 'BASE_RESUME_PATH', 'resume.json')
-    
-    # Try fetching resume from Supabase first, fall back to local file
-    default_resume_data = supabase_utils.get_base_resume()
-    
-    if default_resume_data:
-        logging.info("Successfully loaded base resume from Supabase database.")
-    elif os.path.exists(resume_path):
-        logging.info(f"Supabase fetch failed. Falling back to local file: {resume_path}")
-        try:
-            with open(resume_path, 'r', encoding='utf-8') as f:
-                default_resume_data = json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to read or decode {resume_path}: {e}")
-            default_resume_data = None
-    else:
-        logging.error(f"Base resume not found in Supabase or at '{resume_path}'. Please run the 'Parse Resume' workflow first.")
-
-    if default_resume_data:
-        # 2. Format Resume to Text
-        default_resume_text = format_resume_to_text(default_resume_data)
-        logging.info("Default resume data formatted to text.")
-
-        # 3. Fetch Jobs to Score
-        jobs_to_score_initially = supabase_utils.get_jobs_to_score(config.JOBS_TO_SCORE_PER_RUN)
-        if not jobs_to_score_initially:
-            logging.info("No jobs require initial scoring at this time.")
-        else:
-            logging.info(f"Processing {len(jobs_to_score_initially)} jobs for initial scoring...")
-            successful_initial_scores = 0
-            failed_initial_scores = 0
-
-            # 4. Loop Through Jobs and Score Them
-            for i, job in enumerate(jobs_to_score_initially):
-                job_id = job.get('job_id')
-                if not job_id:
-                    logging.warning("Found job data without job_id during initial scoring. Skipping.")
-                    failed_initial_scores +=1
-                    continue
-
-                logging.info(f"--- Initial Scoring Job {i+1}/{len(jobs_to_score_initially)} (ID: {job_id}) ---")
-                score = get_resume_score_from_ai(default_resume_text, job)
-
-                if score is not None:
-                    if supabase_utils.update_job_score(job_id, score, resume_score_stage="initial"):
-                        successful_initial_scores += 1
-                    else:
-                        failed_initial_scores += 1
-                else:
-                    failed_initial_scores += 1
-
-                if i < len(jobs_to_score_initially) - 1:
-                    logging.debug(f"Waiting {config.LLM_REQUEST_DELAY_SECONDS} seconds before next API call...")
-                    time.sleep(config.LLM_REQUEST_DELAY_SECONDS)
-            
-            initial_score_end_time = time.time()
-            logging.info("--- Initial Scoring Phase Finished ---")
-            logging.info(f"Successfully initially scored: {successful_initial_scores}")
-            logging.info(f"Failed/Skipped initial scores: {failed_initial_scores}")
-            logging.info(f"Total initial scoring time: {initial_score_end_time - initial_score_start_time:.2f} seconds")
-
-    # # --- Phase 2: Re-scoring with Custom Resumes ---
-    rescore_jobs_with_custom_resume() 
-
-    overall_end_time = time.time()
-    logging.info("--- Job Scoring Script Finished (All Phases) ---")
-    logging.info(f"Total script execution time: {overall_end_time - overall_start_time:.2f} seconds")
+    logging.info(f"--- Scoring complete: {len(scored_jobs)}/{len(jobs_to_score)} scored ---")
+    return scored_jobs
 
 
 if __name__ == "__main__":
-    if not config.LLM_API_KEY:
-        logging.error("LLM_API_KEY environment variable not set. (Also accepts GEMINI_API_KEY / GEMINI_FIRST_API_KEY)")
+    if not config.ANTHROPIC_API_KEY:
+        logging.error("ANTHROPIC_API_KEY not set.")
     elif not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
-        logging.error("Supabase URL or Key environment variable not set.")
+        logging.error("Supabase URL or Key not set.")
     else:
-        main()
+        score_unscored_jobs()
