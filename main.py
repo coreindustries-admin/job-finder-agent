@@ -49,9 +49,11 @@ def run_pipeline():
     else:
         logging.info("\n--- STEP 2: No new jobs to save ---")
 
-    # Step 3: Score unscored jobs
-    logging.info("\n--- STEP 3: Scoring unscored jobs ---")
-    scored_jobs = score_unscored_jobs()
+    # Step 3: Score unscored jobs (allow override via SCORE_LIMIT env)
+    score_limit_env = os.environ.get("SCORE_LIMIT", "").strip()
+    score_limit = int(score_limit_env) if score_limit_env.isdigit() else None
+    logging.info(f"\n--- STEP 3: Scoring unscored jobs (limit={score_limit or config.JOBS_TO_SCORE_PER_RUN}) ---")
+    scored_jobs = score_unscored_jobs(limit=score_limit)
 
     # Step 4: Send email digest
     logging.info("\n--- STEP 4: Sending email digest ---")

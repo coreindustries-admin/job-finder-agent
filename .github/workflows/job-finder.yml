@@ -11,6 +11,10 @@ on:
         description: 'Skip Apify scrape (reuse jobs already in DB)'
         type: boolean
         default: false
+      score_limit:
+        description: 'Max jobs to score (blank = use config default of 100)'
+        type: string
+        default: ''
 
 jobs:
   run-pipeline:
@@ -40,4 +44,5 @@ jobs:
           EMAILIT_API_KEY: ${{ secrets.EMAILIT_API_KEY }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           SKIP_SCRAPE: ${{ inputs.skip_scrape && '1' || '' }}
+          SCORE_LIMIT: ${{ inputs.score_limit }}
         run: python main.py
