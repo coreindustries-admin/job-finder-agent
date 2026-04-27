@@ -5,7 +5,12 @@ on:
     # 8:00 AM ET = 12:00 UTC (during EDT) / 13:00 UTC (during EST)
     # Using 12:00 UTC = 8 AM EDT (March-November). Will be 7 AM EST in winter.
     - cron: '0 12 * * *'
-  workflow_dispatch:  # allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      skip_scrape:
+        description: 'Skip Apify scrape (reuse jobs already in DB)'
+        type: boolean
+        default: false
 
 jobs:
   run-pipeline:
@@ -34,4 +39,5 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EMAILIT_API_KEY: ${{ secrets.EMAILIT_API_KEY }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          SKIP_SCRAPE: ${{ inputs.skip_scrape && '1' || '' }}
         run: python main.py

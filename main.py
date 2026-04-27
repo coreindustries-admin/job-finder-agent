@@ -11,6 +11,7 @@ Designed to run twice daily via Claude Code Routines (or n8n fallback).
 """
 
 import logging
+import os
 import time
 
 import config
@@ -31,9 +32,15 @@ def run_pipeline():
     logging.info("JOB FINDER PIPELINE — Starting")
     logging.info("=" * 60)
 
+    skip_scrape = os.environ.get("SKIP_SCRAPE", "").lower() in ("1", "true", "yes")
+
     # Step 1: Scrape new jobs
-    logging.info("\n--- STEP 1: Scraping job boards ---")
-    new_jobs = scrape_all_queries()
+    if skip_scrape:
+        logging.info("\n--- STEP 1: SKIPPED (SKIP_SCRAPE=1) ---")
+        new_jobs = []
+    else:
+        logging.info("\n--- STEP 1: Scraping job boards ---")
+        new_jobs = scrape_all_queries()
 
     # Step 2: Save new jobs to Supabase
     if new_jobs:
