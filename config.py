@@ -11,6 +11,7 @@ SUPABASE_SERVICE_ROLE_KEY: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_TABLE_NAME: str = "jobs"
 ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY")
 EMAILIT_API_KEY: str = os.environ.get("EMAILIT_API_KEY")
+APIFY_TOKEN: str = os.environ.get("APIFY_TOKEN")
 
 # =================================================================
 # 2. SEARCH CONFIGURATION
@@ -28,22 +29,22 @@ SEARCH_QUERIES = [
     "freelance web developer AI",
 ]
 
-# JobSpy settings
-JOBSPY_SITES = ["indeed", "google"]  # LinkedIn returns empty descriptions, skip it
-JOBSPY_LOCATION = "Remote"
-JOBSPY_DISTANCE = 50  # miles from zip code for non-remote
-JOBSPY_ZIP_CODE = "34986"  # Port St. Lucie, FL
-JOBSPY_JOB_TYPES = ["contract", "parttime"]  # Run a search for each type
-JOBSPY_IS_REMOTE = True
-JOBSPY_RESULTS_WANTED = 25  # per search query
-JOBSPY_HOURS_OLD = 72  # jobs posted in last 72 hours (widen for initial runs)
+# Apify scraper settings (borderline/indeed-scraper)
+APIFY_ACTOR_ID = "borderline/indeed-scraper"
+APIFY_COUNTRY = "us"
+APIFY_REMOTE = "remote"  # remote-only filter
+APIFY_JOB_TYPES = ["contract", "parttime"]  # one actor call per type
+APIFY_FROM_DAYS = "1"  # last 24 hours
+APIFY_SORT = "date"  # newest first
+APIFY_MAX_ROWS_PER_QUERY = 15  # per Indeed search URL
+APIFY_MAX_ROWS_GLOBAL = 100  # hard ceiling per run (cost cap)
 
 # =================================================================
 # 3. SCORING CONFIGURATION
 # =================================================================
 SCORING_MODEL = "claude-haiku-4-5-20251001"
 SCORING_THRESHOLD = 5  # minimum score to include in digest (out of 10)
-JOBS_TO_SCORE_PER_RUN = 50
+JOBS_TO_SCORE_PER_RUN = 100
 
 # =================================================================
 # 4. EMAIL CONFIGURATION

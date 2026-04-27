@@ -2,5 +2,5 @@ python-dotenv
 supabase
 httpx
 pydantic
-jobspy
+apify-client
 anthropic

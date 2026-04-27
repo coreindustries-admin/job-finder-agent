@@ -8,7 +8,6 @@ Each job includes: score, type, pay, TLDR summary, pros/cons.
 import json
 import logging
 from typing import Optional
-from urllib.parse import quote
 
 import httpx
 
@@ -124,7 +123,9 @@ def build_email_html(scored_jobs: list) -> str:
         company = job.get("company", "Unknown")
         if company == "nan" or not company:
             company = "Not listed"
-        location = job.get("location", "Not specified")
+        location = job.get("location") or "Not specified"
+        if job.get("is_remote") and location not in ("Remote", "Not specified"):
+            location = f"Remote ({location})"
         tldr = job.get("tldr", job.get("reason", ""))
         job_id = job.get("job_id", "")
 
@@ -147,35 +148,11 @@ def build_email_html(scored_jobs: list) -> str:
         type_color = _badge_color(job_type)
         score_bg = _score_color(score)
 
-        # Build URLs
+        # Build listing link (job_id from Apify is short jobKey, not URL — use job_url_direct)
+        listing_url = job.get("job_url_direct") or (job_id if job_id.startswith("http") else "")
         listing_link = ""
-        if job_id.startswith("http"):
-            listing_link = f'<a href="{job_id}" style="color:#2563eb;text-decoration:none;font-size:13px;">View Listing &rarr;</a>'
-
-        # Feedback action links
-        base_fb = config.N8N_FEEDBACK_WEBHOOK_URL
-        encoded_id = quote(job_id, safe="")
-        encoded_title = quote(title, safe="")
-        encoded_company = quote(company, safe="")
-
-        btn_style_green = "display:inline-block;background:#16a34a;color:white;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;text-decoration:none;margin-right:6px;"
-        btn_style_gray = "display:inline-block;background:#e5e7eb;color:#374151;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;text-decoration:none;margin-right:6px;"
-        btn_style_red = "display:inline-block;background:#fee2e2;color:#991b1b;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;text-decoration:none;margin-right:6px;"
-
-        interested_url = f"{base_fb}?job_id={encoded_id}&action=interested&title={encoded_title}&company={encoded_company}"
-        skip_url = f"{base_fb}?job_id={encoded_id}&action=skip&title={encoded_title}&company={encoded_company}"
-        not_fit_url = f"{base_fb}?job_id={encoded_id}&action=not_fit&title={encoded_title}&company={encoded_company}"
-
-        # mailto for detailed notes
-        mail_subject = quote(f"Feedback: {title} at {company} | {job_id}", safe="")
-        mailto_link = f"mailto:{config.EMAILIT_TO}?subject={mail_subject}"
-
-        feedback_html = f"""
-            <div style="margin-top:12px;">
-                <a href="{interested_url}" style="{btn_style_green}">Interested</a>
-                <a href="{skip_url}" style="{btn_style_gray}">Skip</a>
-                <a href="{not_fit_url}" style="{btn_style_red}">Not a Fit</a>
-            </div>"""
+        if listing_url:
+            listing_link = f'<a href="{listing_url}" style="color:#2563eb;text-decoration:none;font-size:13px;">View Listing &rarr;</a>'
 
         pros_cons_html = _render_pros_cons(pros, cons)
 
@@ -205,15 +182,13 @@ def build_email_html(scored_jobs: list) -> str:
                 {pros_cons_html}
 
                 <div style="margin-top:10px;">{listing_link}</div>
-
-                {feedback_html}
             </td>
         </tr>"""
 
     from cost_tracker import tracker
     cost_line = ""
     if tracker.num_calls > 0:
-        cost_line = f'<span style="color:#9ca3af;"> | Run cost: ${tracker.total_cost:.3f} ({tracker.num_calls} jobs scored)</span>'
+        cost_line = f'<span style="color:#9ca3af;"> | Scoring cost: ${tracker.total_cost:.3f} ({tracker.num_calls} jobs)</span>'
 
     html = f"""
     <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:640px;margin:0 auto;padding:24px;">
@@ -224,7 +199,7 @@ def build_email_html(scored_jobs: list) -> str:
             {rows}
         </table>
 
-        <div style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:12px;">
+        <div style="margin-top:24px;color:#9ca3af;font-size:12px;text-align:center;">
             Otis's Job Finder System | Scores based on your profile and preferences
         </div>
     </div>"""

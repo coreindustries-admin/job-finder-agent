@@ -74,6 +74,16 @@ n8n, Make, Zapier, automation platforms, AI, LLM, Claude, OpenAI, GPT, Gemini, A
 
 **Bilingual bonus:** English (native) + Spanish (fluent). Roles valuing bilingual get a score boost.
 
+**Time Zone Constraint (IMPORTANT):**
+The candidate is in **Eastern Time (ET, UTC-5/-4)** and will not relocate. Even for remote roles, the company's HQ time zone matters because of meetings and overlap windows. Apply this rule:
+- Job HQ in ET or "US-wide remote": no penalty
+- Job HQ in CT (Central, 1hr behind): minor penalty (-1)
+- Job HQ in MT/PT (Mountain/Pacific, 2-3hr behind) AND requires real-time collaboration / standup attendance / overlap with West Coast hours: significant penalty (-2 or score 4 max)
+- Job explicitly requires being in a non-ET time zone (e.g. "must work PT hours", "core hours 9-5 PST"): score 3 or lower
+- International (EU, APAC) requiring overlap outside ET business hours: score 2 or lower
+
+If the description doesn't mention time zone requirements at all, assume flexible and don't penalize.
+
 """
 
     if anti_patterns:
@@ -249,6 +259,9 @@ def score_unscored_jobs(limit: int = None) -> list:
                 **job,
                 "score": result["score"],
                 "reason": result["reason"],
+                "tldr": result["tldr"],
+                "pros": result["pros"],
+                "cons": result["cons"],
             })
             logging.info(f"  Score: {result['score']}/10 — {result['reason']}")
         else:
