@@ -6,3 +6,6 @@ venv/
 resume.json
 resume.pdf
 Daily Logs/
+*.jpg
+*.jpeg
+*.png

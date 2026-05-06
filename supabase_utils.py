@@ -134,7 +134,7 @@ def get_jobs_to_score(limit: int) -> list:
         # Select fields needed for scoring
         # Prioritize jobs with actual descriptions (Indeed > LinkedIn which has empty ones)
         response = supabase.table(config.SUPABASE_TABLE_NAME)\
-                           .select("job_id, job_title, company, description, level, location, job_type, salary_min, salary_max, salary_interval, is_remote")\
+                           .select("job_id, job_title, company, description, level, location, job_type, salary_min, salary_max, salary_interval, is_remote, job_url_direct")\
                            .eq("is_active", True)\
                            .is_("resume_score", None)\
                            .neq("description", "")\
